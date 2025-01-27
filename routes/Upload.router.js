@@ -1,109 +1,69 @@
 const express = require("express");
 const multer = require("multer");
-const fs = require("fs");
 const path = require("path");
-const util = require("util");
-const ffprobe = require("fluent-ffmpeg");
-const { uploadFile } = require("../utils/fileUpload");
+const fs = require("fs");
+const { uploadFile } = require("../utils/fileUpload"); // Your utility file
+const { promisify } = require("util");
 
-const unlinkFile = util.promisify(fs.unlink);
-const uploadRouter = express.Router();
-
-let uniqueFileName;
-
-// Ensure the temp directory exists
-const ensureTempDirectory = () => {
-  const tempDir = path.join(__dirname, "../temp");
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-    console.log(`Created temp directory at: ${tempDir}`);
-  }
-  return tempDir;
-};
+const unlinkFile = promisify(fs.unlink); // Promisify unlink for cleaner code
+const router = express.Router();
 
 // Configure Multer for temporary file storage
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const tempDir = ensureTempDirectory(); // Ensure temp directory exists
-    cb(null, tempDir); // Temporary directory
-  },
-  filename: function (req, file, cb) {
-    const timestamp = Date.now();
-    uniqueFileName = `${timestamp}-${file.originalname}`;
-    cb(null, uniqueFileName);
-  },
-});
-
 const upload = multer({
-  storage: storage,
+  dest: path.join(__dirname, "../temp"), // Temporary directory
   limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit
 });
 
-// File Upload Endpoint
-uploadRouter.post("/", upload.single("file"), async (req, res) => {
-  try {
-    // Validate if file exists
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: "No file uploaded." });
-    }
-
-    const tempDir = ensureTempDirectory();
-    const filePath = path.join(tempDir, uniqueFileName);
-    const fileMimeType = req.file.mimetype;
-
-    console.log(`File uploaded to temp folder: ${filePath}`);
-
-    // Validate file using ffprobe
-    const validateFile = () =>
-      new Promise((resolve, reject) => {
-        ffprobe(filePath, (err, metadata) => {
-          if (err) {
-            return reject(new Error("Invalid file format or file is corrupted."));
-          }
-          console.log("File metadata:", metadata); // Debugging metadata
-          resolve(metadata);
-        });
-      });
+// File Upload Route
+router.post(
+  "/",
+  upload.single("file"), // Expect a single file with the key "file"
+  async (req, res) => {
+    const tempFiles = [];
+    const uploadedFile = req.file;
 
     try {
-      await validateFile(); // Validate file with ffprobe
-
-      // Upload to Firebase using the utility function
-      const publicUrl = await uploadFile(filePath, uniqueFileName);
-
-      // Cleanup temporary file
-      await unlinkFile(filePath);
-
-      res.status(200).json({
-        success: true,
-        message: "File uploaded successfully",
-        fileUrl: publicUrl,
-      });
-    } catch (uploadError) {
-      console.error("Upload or validation error:", uploadError.message);
-
-      // Cleanup temporary file in case of failure
-      if (fs.existsSync(filePath)) {
-        await unlinkFile(filePath);
+      if (!uploadedFile) {
+        return res.status(400).json({ message: "No file uploaded." });
       }
 
-      res.status(500).json({ success: false, message: uploadError.message });
-    }
-  } catch (error) {
-    console.error("Unexpected error:", error.message);
+      // Temporary file details
+      const filePath = uploadedFile.path;
+      const fileName = uploadedFile.originalname;
+      tempFiles.push(filePath); // Track temp files for cleanup
 
-    // Cleanup temporary file if it exists
-    const tempDir = ensureTempDirectory();
-    const filePath = path.join(tempDir, uniqueFileName);
-    if (fs.existsSync(filePath)) {
-      await unlinkFile(filePath);
-    }
+      console.log(`File uploaded to temp folder: ${filePath}`);
 
-    res.status(500).json({
-      success: false,
-      message: "Unexpected error occurred during upload.",
-    });
+      // Upload file to Firebase (using utility function)
+      const fileUrl = await uploadFile(filePath, fileName);
+      console.log("File uploaded to Firebase:", fileUrl);
+
+      // Respond with success
+      return res.status(200).json({
+        success: true,
+        message: "File uploaded successfully.",
+        fileUrl,
+      });
+    } catch (error) {
+      console.error("Error during file upload process:", error.message);
+      return res.status(500).json({
+        success: false,
+        message: "An error occurred during the file upload process.",
+      });
+    } finally {
+      // Cleanup temp files
+      await Promise.all(
+        tempFiles.map(async (filePath) => {
+          try {
+            await unlinkFile(filePath);
+            console.log(`Temporary file deleted: ${filePath}`);
+          } catch (err) {
+            console.error(`Failed to delete temp file: ${filePath}`, err.message);
+          }
+        })
+      );
+    }
   }
-});
+);
 
-module.exports = uploadRouter;
+module.exports = router;
