@@ -232,4 +232,107 @@ router.delete("/:answerId", async (req, res) => {
 });
 
 
+// new on ------------------------------------------------------------------------
+// ---------------------------------------------------------------
+
+// Submit an answer attempt
+router.post('/submit1', upload.array("answerFiles"), async (req, res) => {
+  const tempFiles = [];
+  try {
+    const { userId, degreeId, courses, chapters, lessons, subLessons } = req.body;
+    if (!userId || !degreeId) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    let answerDoc = await Answer.findOne({ userId, degreeId });
+    if (!answerDoc) {
+      answerDoc = new Answer({ userId, degreeId, courses: [], chapters: [], lessons: [], subLessons: [] });
+    }
+
+    let parsedCourses = JSON.parse(courses || "[]");
+    let parsedChapters = JSON.parse(chapters || "[]");
+    let parsedLessons = JSON.parse(lessons || "[]");
+    let parsedSubLessons = JSON.parse(subLessons || "[]");
+
+    const uploadedFiles = req.files || [];
+    const answerFilesUrls = await Promise.all(
+      uploadedFiles.map(async (file) => {
+        tempFiles.push(file.path);
+        return await uploadFile(file.path, file.originalname);
+      })
+    );
+
+    const processEntities = (entities, fieldName, idField) => {
+      let fileIndex = 0;
+      entities.forEach(({ [idField]: entityId, maxMarks, attempts }) => {
+        let entity = answerDoc[fieldName].find(e => e[idField].equals(entityId));
+        if (!entity) {
+          entity = { [idField]: entityId, maxMarks, attempts: [], bestMarks: 0 };
+          answerDoc[fieldName].push(entity);
+        }
+        if (entity.attempts.length < 5) {
+          attempts.forEach(attempt => {
+            attempt.answers.forEach(answer => {
+              if (answer.type === 'QuestionAnswer') {
+                answer.marks = 0; // Admin updates later
+                if (!answer.fileUrl && fileIndex < answerFilesUrls.length) {
+                  answer.fileUrl = answerFilesUrls[fileIndex];
+                  fileIndex++;
+                }
+              }
+            });
+            
+            // Auto-calculate marksObtained
+            attempt.marksObtained = attempt.answers.reduce((sum, ans) => sum + (ans.marks || 0), 0);
+            entity.attempts.push(attempt);
+          });
+          
+          // Auto-calculate bestMarks
+          entity.bestMarks = Math.max(0, ...entity.attempts.map(a => a.marksObtained));
+        }
+      });
+    };
+
+    processEntities(parsedCourses, 'courses', 'courseId');
+    processEntities(parsedChapters, 'chapters', 'chapterId');
+    processEntities(parsedLessons, 'lessons', 'lessonId');
+    processEntities(parsedSubLessons, 'subLessons', 'sublessonId');
+
+    await answerDoc.save();
+    res.status(201).json({ message: 'Test answers submitted successfully', answer: answerDoc });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to submit test answers', error: error.message });
+  } finally {
+    await Promise.all(
+      tempFiles.map(async (filePath) => {
+        try {
+          const fileExists = await fs.access(filePath).then(() => true).catch(() => false);
+          if (fileExists) {
+            await fs.unlink(filePath);
+          }
+        } catch (error) {
+          console.error(`Failed to delete temp file: ${filePath}`, error);
+        }
+      })
+    );
+  }
+});
+
+// Get user answers by degree ID
+router.get('/user/:userId/:degreeId', async (req, res) => {
+  try {
+    const { userId, degreeId } = req.params;
+    const answerDoc = await Answer.findOne({ userId, degreeId });
+    if (!answerDoc) {
+      return res.status(404).json({ message: 'Answers not found' });
+    }
+    res.status(200).json(answerDoc);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error });
+  }
+});
+
+
+
+
 module.exports = router;
