@@ -13,162 +13,6 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
 });
 
-// Route to submit answers
-router.post("/submit", upload.array("answerFiles"), async (req, res) => {
-    const tempFiles = [];
-    
-    try {
-      const { userId, degreeId, courses, chapters, lessons, subLessons } = req.body;
-  
-      if (!userId || !degreeId) {
-        return res.status(400).json({ message: "Missing required fields" });
-      }
-  
-      let parsedCourses, parsedChapters, parsedLessons, parsedSubLessons;
-      try {
-        parsedCourses = JSON.parse(courses || "[]");
-        parsedChapters = JSON.parse(chapters || "[]");
-        parsedLessons = JSON.parse(lessons || "[]");
-        parsedSubLessons = JSON.parse(subLessons || "[]");
-      } catch (error) {
-        return res.status(400).json({ message: "Invalid JSON format" });
-      }
-  
-      const uploadedFiles = req.files || [];
-      const answerFilesUrls = await Promise.all(
-        uploadedFiles.map(async (file) => {
-          tempFiles.push(file.path);  
-          return await uploadFile(file.path, file.originalname);
-        })
-      );
-  
-      const attachFilesToAnswers = (answers) => {
-        let fileIndex = 0;
-        answers.forEach((item) => {
-          if (item.test && item.test.type === "QuestionAnswer") {
-            item.test.questions.forEach((question) => {
-              if (!question.file && fileIndex < answerFilesUrls.length) {
-                question.file = answerFilesUrls[fileIndex];
-                fileIndex++;
-              }
-            });
-          }
-        });
-      };
-  
-      // Attach files to respective test answers
-      attachFilesToAnswers(parsedCourses);
-      attachFilesToAnswers(parsedChapters);
-      attachFilesToAnswers(parsedLessons);
-      attachFilesToAnswers(parsedSubLessons);
-  
-      const newAnswer = new Answer({
-        userId,
-        degreeId,
-        courses: parsedCourses,
-        chapters: parsedChapters,
-        lessons: parsedLessons,
-        subLessons: parsedSubLessons,
-        overallMarks: 0,  // Placeholder for marks, updated after evaluation
-        percentage: 0,
-      });
-  
-      await newAnswer.save();
-  
-      res.status(201).json({ message: "Test answers submitted successfully", answer: newAnswer });
-    } catch (error) {
-      console.error("Error submitting test answers:", error);
-      res.status(500).json({ message: "Failed to submit test answers", error: error.message });
-    } finally {
-      // Cleanup temporary files
-      await Promise.all(
-        tempFiles.map(async (filePath) => {
-          try {
-            const fileExists = await fs.access(filePath).then(() => true).catch(() => false);
-            if (fileExists) {
-              await fs.unlink(filePath);
-              console.log(`Temporary file deleted: ${filePath}`);
-            }
-          } catch (error) {
-            console.error(`Failed to delete temp file: ${filePath}`, error);
-          }
-        })
-      );
-    }
-  });
-  
-// Route to update marks and recalculate total
-router.post('/update-marks', async (req, res) => {
-  try {
-      const { answerId, updatedAnswers } = req.body;
-
-      if (!answerId || !updatedAnswers) {
-          return res.status(400).json({ message: 'Missing required fields' });
-      }
-
-      const answerDoc = await Answer.findById(answerId);
-      if (!answerDoc) {
-          return res.status(404).json({ message: 'Answer not found' });
-      }
-
-      // Parse updatedAnswers if it's a string, else use it directly
-      const updatedData = typeof updatedAnswers === 'string' ? JSON.parse(updatedAnswers) : updatedAnswers;
-
-      // Update marks within nested subLessons.testAnswers
-      answerDoc.subLessons.forEach(subLesson => {
-          const updatedSubLesson = updatedData.subLessons.find(sl => sl.subLessonId === subLesson.subLessonId);
-          if (updatedSubLesson) {
-              subLesson.testAnswers.forEach(answer => {
-                  const updatedAnswer = updatedSubLesson.testAnswers.find(ua => ua._id === String(answer._id));
-                  if (updatedAnswer) {
-                      answer.marks = updatedAnswer.marks;
-                  }
-              });
-              subLesson.marks = subLesson.testAnswers.reduce((sum, testAnswer) => sum + (testAnswer.marks || 0), 0); // Update subLesson marks
-          }
-      });
-
-      // Recalculate total marks and percentage
-      const { overallMarks, percentage } = recalculateMarksAndPercentage(answerDoc);
-      answerDoc.totalMarks = overallMarks;
-      answerDoc.percentage = percentage;
-
-      await answerDoc.save();
-      res.status(200).json({ message: 'Marks updated successfully', updatedAnswer: answerDoc });
-  } catch (error) {
-      console.error('Error updating marks:', error);
-      res.status(500).json({ message: 'Failed to update marks', error: error.message });
-  }
-});
-
-
-function calculateOverallMarks(data) {
-  let totalMarks = 0;
-  const sumMarks = (items) => {
-    return items.reduce((sum, item) => {
-      if (item.testAnswers) {
-        sum += item.testAnswers.reduce((innerSum, ta) => innerSum + (ta.marks || 0), 0);
-      } else {
-        sum += item.marks || 0;
-      }
-      return sum;
-    }, 0);
-  };
-
-  totalMarks += sumMarks(data.courses || []);
-  totalMarks += sumMarks(data.chapters || []);
-  totalMarks += sumMarks(data.lessons || []);
-  totalMarks += sumMarks(data.subLessons || []);
-
-  return totalMarks;
-}
-
-function recalculateMarksAndPercentage(answerDoc) {
-  const overallMarks = calculateOverallMarks(answerDoc);
-  const maxPossibleMarks = 100; // Customize based on your scoring system
-  const percentage = (overallMarks / maxPossibleMarks) * 100;
-  return { overallMarks, percentage };
-}
 
 
 router.get("/", async (req, res) => {
@@ -181,40 +25,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-// GET answers by userId
-router.get("/user/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const answers = await Answer.find({ userId });
-    if (!answers || answers.length === 0) {
-      return res.status(404).json({ message: "No answers found for this user" });
-    }
-    res.status(200).json({ message: "Answers retrieved successfully", answers });
-  } catch (error) {
-    console.error("Error retrieving answers by userId:", error);
-    res.status(500).json({ message: "Failed to retrieve answers", error: error.message });
-  }
-});
 
-// PUT to update an answer
-router.put("/:answerId", async (req, res) => {
-  try {
-    const { answerId } = req.params;
-    const updateData = req.body;
-
-    const updatedAnswer = await Answer.findByIdAndUpdate(answerId, updateData, { new: true });
-    if (!updatedAnswer) {
-      return res.status(404).json({ message: "Answer not found" });
-    }
-
-    res.status(200).json({ message: "Answer updated successfully", updatedAnswer });
-  } catch (error) {
-    console.error("Error updating answer:", error);
-    res.status(500).json({ message: "Failed to update answer", error: error.message });
-  }
-});
-
-// DELETE an answer
 router.delete("/:answerId", async (req, res) => {
   try {
     const { answerId } = req.params;
@@ -232,106 +43,166 @@ router.delete("/:answerId", async (req, res) => {
 });
 
 
-// new on ------------------------------------------------------------------------
-// ---------------------------------------------------------------
-
-// Submit an answer attempt
-router.post('/submit1', upload.array("answerFiles"), async (req, res) => {
+router.post('/submit', upload.array("answerFiles"), async (req, res) => {
   const tempFiles = [];
   try {
-    const { userId, degreeId, courses, chapters, lessons, subLessons } = req.body;
-    if (!userId || !degreeId) {
-      return res.status(400).json({ message: 'Missing required fields' });
-    }
+      const { userId, degreeId, courses, chapters, lessons, subLessons } = req.body;
+      if (!userId || !degreeId) {
+          return res.status(400).json({ message: 'Missing required fields' });
+      }
 
-    let answerDoc = await Answer.findOne({ userId, degreeId });
-    if (!answerDoc) {
-      answerDoc = new Answer({ userId, degreeId, courses: [], chapters: [], lessons: [], subLessons: [] });
-    }
+      let answerDoc = await Answer.findOne({ userId, degreeId });
+      if (!answerDoc) {
+          answerDoc = new Answer({ userId, degreeId, courses: [], chapters: [], lessons: [], subLessons: [] });
+      }
 
-    let parsedCourses = JSON.parse(courses || "[]");
-    let parsedChapters = JSON.parse(chapters || "[]");
-    let parsedLessons = JSON.parse(lessons || "[]");
-    let parsedSubLessons = JSON.parse(subLessons || "[]");
+      const parsedCourses = Array.isArray(courses) ? courses : JSON.parse(courses || "[]");
+      const parsedChapters = Array.isArray(chapters) ? chapters : JSON.parse(chapters || "[]");
+      const parsedLessons = Array.isArray(lessons) ? lessons : JSON.parse(lessons || "[]");
+      const parsedSubLessons = Array.isArray(subLessons) ? subLessons : JSON.parse(subLessons || "[]");
 
-    const uploadedFiles = req.files || [];
-    const answerFilesUrls = await Promise.all(
-      uploadedFiles.map(async (file) => {
-        tempFiles.push(file.path);
-        return await uploadFile(file.path, file.originalname);
-      })
-    );
+      const uploadedFiles = req.files || [];
+      const answerFilesUrls = await Promise.all(
+          uploadedFiles.map(async (file) => {
+              tempFiles.push(file.path);
+              return await uploadFile(file.path, file.originalname);
+          })
+      );
 
-    const processEntities = (entities, fieldName, idField) => {
-      let fileIndex = 0;
-      entities.forEach(({ [idField]: entityId, maxMarks, attempts }) => {
-        let entity = answerDoc[fieldName].find(e => e[idField].equals(entityId));
-        if (!entity) {
-          entity = { [idField]: entityId, maxMarks, attempts: [], bestMarks: 0 };
-          answerDoc[fieldName].push(entity);
-        }
-        if (entity.attempts.length < 5) {
-          attempts.forEach(attempt => {
-            attempt.answers.forEach(answer => {
-              if (answer.type === 'QuestionAnswer') {
-                answer.marks = 0; // Admin updates later
-                if (!answer.fileUrl && fileIndex < answerFilesUrls.length) {
-                  answer.fileUrl = answerFilesUrls[fileIndex];
-                  fileIndex++;
-                }
+      const processEntities = async (entities, fieldName, idField) => {
+          for (const entityData of entities) {
+              const entityId = entityData[idField];
+              if (!entityId) continue;
+
+              const attemptsData = entityData.attempts || [];
+              let entity = answerDoc[fieldName].find(e => e[idField] && e[idField].equals(entityId));
+
+              if (!entity) {
+                  entity = {
+                      [idField]: entityId,
+                      maxMarks: entityData.maxMarks || 0,
+                      attempts: [],
+                      bestMarks: 0
+                  };
+                  answerDoc[fieldName].push(entity);
               }
-            });
-            
-            // Auto-calculate marksObtained
-            attempt.marksObtained = attempt.answers.reduce((sum, ans) => sum + (ans.marks || 0), 0);
-            entity.attempts.push(attempt);
-          });
-          
-          // Auto-calculate bestMarks
-          entity.bestMarks = Math.max(0, ...entity.attempts.map(a => a.marksObtained));
-        }
-      });
-    };
 
-    processEntities(parsedCourses, 'courses', 'courseId');
-    processEntities(parsedChapters, 'chapters', 'chapterId');
-    processEntities(parsedLessons, 'lessons', 'lessonId');
-    processEntities(parsedSubLessons, 'subLessons', 'sublessonId');
-
-    await answerDoc.save();
-    res.status(201).json({ message: 'Test answers submitted successfully', answer: answerDoc });
-  } catch (error) {
-    res.status(500).json({ message: 'Failed to submit test answers', error: error.message });
-  } finally {
-    await Promise.all(
-      tempFiles.map(async (filePath) => {
-        try {
-          const fileExists = await fs.access(filePath).then(() => true).catch(() => false);
-          if (fileExists) {
-            await fs.unlink(filePath);
+              for (const attemptData of attemptsData) {
+                  const attempt = {
+                      answers: attemptData.answers || [],
+                      marksObtained: attemptData.answers.reduce((sum, ans) => sum + (ans.marks || 0), 0),
+                      attemptedAt: new Date(),
+                      isBest: false
+                  };
+                  entity.attempts.push(attempt);
+                  entity.bestMarks = Math.max(entity.bestMarks, attempt.marksObtained);
+              }
           }
-        } catch (error) {
-          console.error(`Failed to delete temp file: ${filePath}`, error);
-        }
-      })
-    );
-  }
-});
+      };
 
-// Get user answers by degree ID
-router.get('/user/:userId/:degreeId', async (req, res) => {
-  try {
-    const { userId, degreeId } = req.params;
-    const answerDoc = await Answer.findOne({ userId, degreeId });
-    if (!answerDoc) {
-      return res.status(404).json({ message: 'Answers not found' });
-    }
-    res.status(200).json(answerDoc);
+      await processEntities(parsedCourses, 'courses', 'courseId');
+      await processEntities(parsedChapters, 'chapters', 'chapterId');
+      await processEntities(parsedLessons, 'lessons', 'lessonId');
+      await processEntities(parsedSubLessons, 'subLessons', 'sublessonId');
+
+      await answerDoc.save();
+      res.status(201).json({ message: 'Answers submitted successfully', answer: answerDoc });
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error });
+      res.status(500).json({ message: 'Submission failed', error: error.message });
+  } finally {
+      await Promise.all(
+          tempFiles.map(async (path) => {
+              try { await fs.unlink(path); } catch (err) { console.error(err); }
+          })
+      );
   }
 });
 
+router.get('/:userId/:degreeId', async (req, res) => {
+  try {
+      const { userId, degreeId } = req.params;
+      const answerDoc = await Answer.findOne({ userId, degreeId });
+      if (!answerDoc) {
+          return res.status(404).json({ message: 'Answers not found' });
+      }
+      res.status(200).json(answerDoc);
+  } catch (error) {
+      res.status(500).json({ message: 'Server error', error });
+  }
+});
+
+router.put('/update-marks/:userId/:degreeId', async (req, res) => {
+    try {
+        const { userId, degreeId } = req.params;
+        const { updatedMarks } = req.body; 
+
+        if (!updatedMarks || Object.keys(updatedMarks).length === 0) {
+            return res.status(400).json({ message: "No marks provided for update" });
+        }
+
+        const answer = await Answer.findOne({ userId, degreeId });
+
+        if (!answer) {
+            return res.status(404).json({ message: 'Answer not found' });
+        }
+
+        const updateMarksDirectly = (entities) => {
+            entities.forEach(entity => {
+                entity.attempts.forEach(attempt => {
+                    attempt.answers.forEach(answer => {
+                        if (answer.type === 'QuestionAnswer' && updatedMarks[answer._id]) {
+                            console.log(`Admin updating marks for answer ID: ${answer._id}`);
+                            answer.marks = updatedMarks[answer._id]; 
+                        }
+                    });
+                });
+
+                entity.bestMarks = entity.attempts.reduce((maxMarks, attempt) => {
+                    let attemptTotal = attempt.answers.reduce((sum, ans) => sum + ans.marks, 0);
+                    return Math.max(maxMarks, attemptTotal);
+                }, 0);
+            });
+        };
+
+        updateMarksDirectly(answer.courses);
+        updateMarksDirectly(answer.chapters);
+        updateMarksDirectly(answer.lessons);
+        updateMarksDirectly(answer.subLessons);
+
+        let totalMarks = 0;
+        let totalPossibleMarks = 0;
+
+        const calculateEntityMarks = (entities) => {
+            entities.forEach(entity => {
+                if (entity.attempts.length > 0) {
+                    let entityMaxMarks = entity.attempts[0].answers.reduce(
+                        (sum, answer) => sum + answer.maxMark, 0
+                    );
+                    totalMarks += entity.bestMarks; 
+                    totalPossibleMarks += entityMaxMarks;
+                }
+            });
+        };
+
+        calculateEntityMarks(answer.courses);
+        calculateEntityMarks(answer.chapters);
+        calculateEntityMarks(answer.lessons);
+        calculateEntityMarks(answer.subLessons);
+
+        answer.totalMarks = totalMarks;
+        answer.totalPossibleMarks = totalPossibleMarks;
+        answer.percentage = totalPossibleMarks > 0 
+            ? Math.min(Math.round((totalMarks / totalPossibleMarks) * 100), 100)
+            : 0;
+
+        await answer.save();
+        res.status(200).json({ message: 'Marks updated successfully', answer });
+
+    } catch (error) {
+        console.error("Error updating marks:", error);
+        res.status(500).json({ message: "Internal server error", error: error.message });
+    }
+});
 
 
 
