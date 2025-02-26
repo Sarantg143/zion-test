@@ -118,7 +118,7 @@ router.post('/submit', upload.array("answerFiles"), async (req, res) => {
   }
 });
 
-router.get('/:userId/:degreeId', async (req, res) => {
+router.get('/user/:userId/:degreeId', async (req, res) => {
   try {
       const { userId, degreeId } = req.params;
       const answerDoc = await Answer.findOne({ userId, degreeId });
